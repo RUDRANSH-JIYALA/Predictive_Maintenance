@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Turbofan RUL Monitor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0B0E11;
+    --panel: #12161C;
+    --panel-border: #232A33;
+    --text: #E5E9EC;
+    --text-dim: #7A8590;
+    --accent-safe: #3DDC84;
+    --accent-caution: #F5A623;
+    --accent-critical: #FF5A5A;
+    --accent-blue: #5B9EF5;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Inter', sans-serif;
+    min-height: 100vh;
+    padding: 32px 20px;
+  }
+
+  .wrap {
+    max-width: 980px;
+    margin: 0 auto;
+  }
+
+  header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    border-bottom: 1px solid var(--panel-border);
+    padding-bottom: 20px;
+    margin-bottom: 28px;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  header h1 {
+    font-size: 1.4rem;
+    font-weight: 600;
+    margin: 0;
+    letter-spacing: 0.01em;
+  }
+
+  header h1 .unit {
+    color: var(--text-dim);
+    font-weight: 400;
+    font-size: 0.9rem;
+    font-family: 'IBM Plex Mono', monospace;
+  }
+
+  .meta {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.8rem;
+    color: var(--text-dim);
+  }
+
+  .meta span { color: var(--accent-blue); }
+
+  .grid {
+    display: grid;
+    grid-template-columns: 1.1fr 1fr;
+    gap: 20px;
+  }
+
+  @media (max-width: 760px) {
+    .grid { grid-template-columns: 1fr; }
+  }
+
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 6px;
+    padding: 22px;
+  }
+
+  .panel-label {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.7rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    margin-bottom: 16px;
+  }
+
+  select {
+    width: 100%;
+    background: #0E1216;
+    border: 1px solid var(--panel-border);
+    color: var(--text);
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.9rem;
+    padding: 10px 12px;
+    border-radius: 4px;
+    margin-bottom: 16px;
+  }
+
+  /* Gauge */
+  .gauge-wrap {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 10px 0 4px;
+  }
+
+  svg#gauge { width: 260px; height: 150px; }
+
+  .gauge-value {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 2.6rem;
+    font-weight: 700;
+    margin-top: -8px;
+    line-height: 1;
+  }
+
+  .gauge-caption {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.75rem;
+    color: var(--text-dim);
+    letter-spacing: 0.05em;
+    margin-top: 4px;
+  }
+
+  .status-row {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 8px;
+    margin-top: 14px;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.8rem;
+    letter-spacing: 0.05em;
+  }
+
+  .status-dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    box-shadow: 0 0 8px currentColor;
+  }
+
+  .status-low { color: var(--accent-safe); }
+  .status-medium { color: var(--accent-caution); }
+  .status-high { color: var(--accent-critical); }
+
+  .compare-row {
+    display: flex;
+    justify-content: space-between;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.85rem;
+    padding-top: 18px;
+    margin-top: 18px;
+    border-top: 1px solid var(--panel-border);
+  }
+
+  .compare-row div span:first-child {
+    display: block;
+    color: var(--text-dim);
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-bottom: 4px;
+  }
+
+  .shap-img {
+    width: 100%;
+    border-radius: 4px;
+    display: block;
+    background: #0E1216;
+  }
+
+  .disclaimer {
+    font-size: 0.75rem;
+    color: var(--text-dim);
+    line-height: 1.5;
+    margin-top: 14px;
+  }
+
+  .loading {
+    color: var(--text-dim);
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.85rem;
+    text-align: center;
+    padding: 40px 0;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>Turbofan RUL Monitor <span class="unit">/ NASA C-MAPSS</span></h1>
+    <div class="meta">MODEL <span>{{ architecture }}</span> &nbsp;·&nbsp; TEST RMSE <span>{{ test_rmse }}</span> cycles</div>
+  </header>
+
+  <div class="grid">
+
+    <div class="panel">
+      <div class="panel-label">Engine Selector</div>
+      <select id="engineSelect">
+        {% for i in range(num_demo) %}
+          <option value="{{ i }}">Engine unit #{{ i + 1 }} (demo)</option>
+        {% endfor %}
+      </select>
+
+      <div id="gaugePanel">
+        <div class="gauge-wrap">
+          <svg id="gauge" viewBox="0 0 260 150">
+            <!-- background arc -->
+            <path d="M 20 140 A 110 110 0 0 1 240 140" fill="none" stroke="#232A33" stroke-width="18" stroke-linecap="round"/>
+            <!-- value arc -->
+            <path id="gaugeArc" d="M 20 140 A 110 110 0 0 1 240 140" fill="none" stroke="var(--accent-safe)" stroke-width="18" stroke-linecap="round" stroke-dasharray="345" stroke-dashoffset="345"/>
+          </svg>
+          <div class="gauge-value" id="gaugeValue">—</div>
+          <div class="gauge-caption">PREDICTED CYCLES REMAINING</div>
+          <div class="status-row" id="statusRow">
+            <span class="status-dot"></span><span id="statusText">AWAITING SELECTION</span>
+          </div>
+        </div>
+
+        <div class="compare-row">
+          <div><span>Predicted RUL</span><span id="predVal">—</span></div>
+          <div><span>True RUL</span><span id="trueVal">—</span></div>
+          <div><span>Error</span><span id="errVal">—</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-label">Sensor Contribution (Baseline Model)</div>
+      <img class="shap-img" src="/shap_plot.png" alt="SHAP feature importance">
+      <div class="disclaimer">
+        Global feature importance from the XGBoost baseline (SHAP), showing
+        which sensors most influence RUL predictions across the test set.
+        The {{ architecture }} model above is what's making live predictions;
+        SHAP is shown for the baseline since tree-model explainability is
+        exact and fast, while explaining transformer/RNN outputs directly
+        needs different (slower, noisier) techniques.
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+const select = document.getElementById("engineSelect");
+const gaugeArc = document.getElementById("gaugeArc");
+const gaugeValue = document.getElementById("gaugeValue");
+const statusRow = document.getElementById("statusRow");
+const statusText = document.getElementById("statusText");
+const predVal = document.getElementById("predVal");
+const trueVal = document.getElementById("trueVal");
+const errVal = document.getElementById("errVal");
+
+const ARC_LENGTH = 345; // approx path length for the gauge arc
+const MAX_RUL_SCALE = 125; // matches the RUL cap used in training
+
+const colors = {
+  low: "#3DDC84",
+  medium: "#F5A623",
+  high: "#FF5A5A"
+};
+
+async function loadPrediction(idx) {
+  statusText.textContent = "PREDICTING...";
+  const res = await fetch(`/predict/${idx}`);
+  const data = await res.json();
+
+  const clamped = Math.min(data.predicted_rul, MAX_RUL_SCALE);
+  const fraction = clamped / MAX_RUL_SCALE;
+  const offset = ARC_LENGTH * (1 - fraction);
+
+  gaugeArc.style.stroke = colors[data.risk];
+  gaugeArc.style.strokeDashoffset = offset;
+  gaugeValue.textContent = data.predicted_rul;
+  gaugeValue.style.color = colors[data.risk];
+
+  statusRow.className = "status-row status-" + data.risk;
+  const labels = { low: "NOMINAL", medium: "MONITOR", high: "MAINTENANCE DUE" };
+  statusText.textContent = labels[data.risk];
+
+  predVal.textContent = data.predicted_rul + " cyc";
+  trueVal.textContent = data.true_rul + " cyc";
+  errVal.textContent = Math.abs(data.predicted_rul - data.true_rul).toFixed(1) + " cyc";
+}
+
+select.addEventListener("change", () => loadPrediction(select.value));
+loadPrediction(0);
+</script>
+
+</body>
+</html>
