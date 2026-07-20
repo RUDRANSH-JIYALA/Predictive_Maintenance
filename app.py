@@ -1,12 +1,13 @@
 """
-Predictive Maintenance Dashboard — Flask app
+Vibration Fault Detection Dashboard — Flask app (Stage 3)
 
-Serves RUL predictions using the trained deep model (LSTM/GRU/Transformer,
-whichever won in the Colab notebook) and shows global feature importance
-from the XGBoost baseline via SHAP.
+Serves fault-stage predictions (Normal / Degrading / Near-Failure) from both
+the leak-free Random Forest and the CNN, for a set of demo bearing vibration
+snapshots. Deliberately surfaces both models' known limitations rather than
+implying more reliability than the underlying results support.
 
 Setup:
-    1. Extract artifacts.zip (downloaded from the Colab notebook, Stage 4)
+    1. Extract stage3_artifacts.zip (downloaded from the Colab notebook)
        into the artifacts/ folder here.
     2. pip install -r requirements.txt
     3. python app.py
@@ -16,9 +17,10 @@ Setup:
 import io
 import json
 import os
+
 import joblib
 import matplotlib
-matplotlib.use("Agg")  # no GUI backend needed for a server
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -32,60 +34,25 @@ app = Flask(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Model architectures (must match the notebook exactly, so state_dict loads)
+# CNN architecture (must match the notebook exactly, so state_dict loads)
 # ---------------------------------------------------------------------------
 
-class LSTMRegressor(nn.Module):
-    def __init__(self, input_size, hidden_size=64, num_layers=2, dropout=0.2):
+class SpectrogramCNN(nn.Module):
+    def __init__(self, num_classes=3):
         super().__init__()
-        self.lstm = nn.LSTM(
-            input_size, hidden_size, num_layers,
-            batch_first=True, dropout=dropout if num_layers > 1 else 0.0,
+        self.conv = nn.Sequential(
+            nn.Conv2d(1, 16, 3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
+            nn.Conv2d(16, 32, 3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
+            nn.Conv2d(32, 64, 3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
         )
         self.fc = nn.Sequential(
-            nn.Linear(hidden_size, 32), nn.ReLU(), nn.Dropout(dropout), nn.Linear(32, 1)
+            nn.Flatten(),
+            nn.Linear(64 * 8 * 8, 64), nn.ReLU(), nn.Dropout(0.3),
+            nn.Linear(64, num_classes),
         )
 
     def forward(self, x):
-        _, (h_n, _) = self.lstm(x)
-        return self.fc(h_n[-1]).squeeze(-1)
-
-
-class GRURegressor(nn.Module):
-    def __init__(self, input_size, hidden_size=64, num_layers=2, dropout=0.2):
-        super().__init__()
-        self.gru = nn.GRU(
-            input_size, hidden_size, num_layers,
-            batch_first=True, dropout=dropout if num_layers > 1 else 0.0,
-        )
-        self.fc = nn.Sequential(
-            nn.Linear(hidden_size, 32), nn.ReLU(), nn.Dropout(dropout), nn.Linear(32, 1)
-        )
-
-    def forward(self, x):
-        _, h_n = self.gru(x)
-        return self.fc(h_n[-1]).squeeze(-1)
-
-
-class TransformerRegressor(nn.Module):
-    def __init__(self, input_size, window_size, d_model=64, nhead=4, num_layers=2, dropout=0.2):
-        super().__init__()
-        self.input_proj = nn.Linear(input_size, d_model)
-        self.pos_embedding = nn.Parameter(torch.randn(1, window_size, d_model) * 0.02)
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model, nhead=nhead, dim_feedforward=d_model * 4,
-            dropout=dropout, batch_first=True,
-        )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-        self.fc = nn.Sequential(
-            nn.Linear(d_model, 32), nn.ReLU(), nn.Dropout(dropout), nn.Linear(32, 1)
-        )
-
-    def forward(self, x):
-        x = self.input_proj(x) + self.pos_embedding
-        x = self.transformer(x)
-        pooled = x.mean(dim=1)
-        return self.fc(pooled).squeeze(-1)
+        return self.fc(self.conv(x))
 
 
 # ---------------------------------------------------------------------------
@@ -93,65 +60,39 @@ class TransformerRegressor(nn.Module):
 # ---------------------------------------------------------------------------
 
 def load_artifacts():
-    with open(os.path.join(ARTIFACT_DIR, "model_config.json")) as f:
-        config = json.load(f)
+    rf_model = joblib.load(os.path.join(ARTIFACT_DIR, "rf_model.pkl"))
 
-    architecture = config["architecture"]
-    num_features = config["num_features"]
-    window_size = config["window_size"]
+    with open(os.path.join(ARTIFACT_DIR, "feature_cols.json")) as f:
+        feature_cols = json.load(f)
 
-    if architecture == "LSTM":
-        model = LSTMRegressor(num_features)
-    elif architecture == "GRU":
-        model = GRURegressor(num_features)
-    elif architecture == "Transformer":
-        model = TransformerRegressor(num_features, window_size)
-    else:
-        raise ValueError(f"Unknown architecture in model_config.json: {architecture}")
+    with open(os.path.join(ARTIFACT_DIR, "cnn_config.json")) as f:
+        cnn_config = json.load(f)
 
-    state_dict = torch.load(
-        os.path.join(ARTIFACT_DIR, "best_model.pt"), map_location="cpu"
-    )
-    model.load_state_dict(state_dict)
-    model.eval()
+    cnn_model = SpectrogramCNN(num_classes=len(cnn_config["classes"]))
+    state_dict = torch.load(os.path.join(ARTIFACT_DIR, "cnn_model.pt"), map_location="cpu")
+    cnn_model.load_state_dict(state_dict)
+    cnn_model.eval()
 
-    demo_sequences = np.load(os.path.join(ARTIFACT_DIR, "demo_sequences.npy"))
-    demo_true_rul = np.load(os.path.join(ARTIFACT_DIR, "demo_true_rul.npy"))
+    demo_df = pd.read_csv(os.path.join(ARTIFACT_DIR, "demo_snapshots.csv"))
+    demo_spectrograms = np.load(os.path.join(ARTIFACT_DIR, "demo_spectrograms.npy"))
 
-    shap_values = np.load(os.path.join(ARTIFACT_DIR, "shap_values.npy"))
-    X_test_baseline = pd.read_csv(os.path.join(ARTIFACT_DIR, "X_test_baseline.csv"))
+    with open(os.path.join(ARTIFACT_DIR, "limitations.json")) as f:
+        limitations = json.load(f)
 
     return {
-        "model": model,
-        "config": config,
-        "demo_sequences": demo_sequences,
-        "demo_true_rul": demo_true_rul,
-        "shap_values": shap_values,
-        "feature_names": list(X_test_baseline.columns),
+        "rf_model": rf_model,
+        "feature_cols": feature_cols,
+        "cnn_model": cnn_model,
+        "cnn_classes": cnn_config["classes"],
+        "demo_df": demo_df,
+        "demo_spectrograms": demo_spectrograms,
+        "limitations": limitations,
     }
 
 
 ARTIFACTS = load_artifacts()
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def predict_rul(sequence: np.ndarray) -> float:
-    """sequence shape: (window_size, num_features)"""
-    with torch.no_grad():
-        x = torch.tensor(sequence, dtype=torch.float32).unsqueeze(0)  # add batch dim
-        pred = ARTIFACTS["model"](x).item()
-    return max(0.0, pred)  # RUL can't be negative
-
-
-def risk_level(rul: float) -> str:
-    if rul < 20:
-        return "high"
-    elif rul < 50:
-        return "medium"
-    return "low"
+STATUS_COLORS = {"Normal": "low", "Degrading": "medium", "Near-Failure": "high"}
 
 
 # ---------------------------------------------------------------------------
@@ -160,66 +101,92 @@ def risk_level(rul: float) -> str:
 
 @app.route("/")
 def index():
-    num_demo = len(ARTIFACTS["demo_sequences"])
-    architecture = ARTIFACTS["config"]["architecture"]
-    test_rmse = ARTIFACTS["config"]["test_rmse"]
+    demo_df = ARTIFACTS["demo_df"]
     return render_template(
         "index.html",
-        num_demo=num_demo,
-        architecture=architecture,
-        test_rmse=round(test_rmse, 2),
+        num_demo=len(demo_df),
+        demo_labels=demo_df["label"].tolist(),
+        limitations=ARTIFACTS["limitations"],
     )
 
 
-@app.route("/predict/<int:engine_idx>")
-def predict(engine_idx):
-    demo_sequences = ARTIFACTS["demo_sequences"]
-    demo_true_rul = ARTIFACTS["demo_true_rul"]
+@app.route("/predict/<int:idx>")
+def predict(idx):
+    demo_df = ARTIFACTS["demo_df"]
+    if idx < 0 or idx >= len(demo_df):
+        return jsonify({"error": "index out of range"}), 400
 
-    if engine_idx < 0 or engine_idx >= len(demo_sequences):
-        return jsonify({"error": "engine index out of range"}), 400
+    row = demo_df.iloc[idx]
+    true_label = row["label"]
 
-    sequence = demo_sequences[engine_idx]
-    predicted_rul = predict_rul(sequence)
-    true_rul = float(demo_true_rul[engine_idx])
+    # Random Forest prediction (pass a DataFrame with matching column names,
+    # not a bare array, so scikit-learn doesn't warn about missing feature names)
+    X = pd.DataFrame([row[ARTIFACTS["feature_cols"]].values], columns=ARTIFACTS["feature_cols"])
+    rf_pred = ARTIFACTS["rf_model"].predict(X)[0]
+    rf_proba = ARTIFACTS["rf_model"].predict_proba(X)[0]
+    rf_classes = list(ARTIFACTS["rf_model"].classes_)
+    rf_proba_dict = {cls: round(float(p), 3) for cls, p in zip(rf_classes, rf_proba)}
+
+    # CNN prediction
+    spec = ARTIFACTS["demo_spectrograms"][idx]
+    with torch.no_grad():
+        x = torch.tensor(spec, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
+        logits = ARTIFACTS["cnn_model"](x)
+        cnn_proba = torch.softmax(logits, dim=1).numpy()[0]
+    cnn_classes = ARTIFACTS["cnn_classes"]
+    cnn_pred = cnn_classes[int(np.argmax(cnn_proba))]
+    cnn_proba_dict = {cls: round(float(p), 3) for cls, p in zip(cnn_classes, cnn_proba)}
 
     return jsonify({
-        "engine_idx": engine_idx,
-        "predicted_rul": round(predicted_rul, 1),
-        "true_rul": round(true_rul, 1),
-        "risk": risk_level(predicted_rul),
-        "architecture": ARTIFACTS["config"]["architecture"],
+        "idx": idx,
+        "true_label": true_label,
+        "rf_prediction": rf_pred,
+        "rf_proba": rf_proba_dict,
+        "rf_status": STATUS_COLORS.get(rf_pred, "medium"),
+        "cnn_prediction": cnn_pred,
+        "cnn_proba": cnn_proba_dict,
+        "cnn_status": STATUS_COLORS.get(cnn_pred, "medium"),
     })
 
 
-@app.route("/shap_plot.png")
-def shap_plot():
-    """Global feature importance bar chart from the XGBoost baseline's SHAP
-    values. This explains the baseline model's sensor-importance ranking —
-    a reasonable proxy for which sensors matter, even though the deep model
-    (not XGBoost) is what's making live predictions above."""
-    shap_values = ARTIFACTS["shap_values"]
-    feature_names = ARTIFACTS["feature_names"]
+@app.route("/spectrogram/<int:idx>.png")
+def spectrogram_image(idx):
+    demo_spectrograms = ARTIFACTS["demo_spectrograms"]
+    if idx < 0 or idx >= len(demo_spectrograms):
+        return jsonify({"error": "index out of range"}), 400
 
-    mean_abs_shap = np.abs(shap_values).mean(axis=0)
-    order = np.argsort(mean_abs_shap)[-10:]  # top 10
-
-    fig, ax = plt.subplots(figsize=(7, 5))
-    ax.barh(
-        [feature_names[i] for i in order],
-        mean_abs_shap[order],
-        color="#4C72B0",
-    )
-    ax.set_xlabel("Mean |SHAP value|")
-    ax.set_title("Top Sensor Contributions (XGBoost Baseline)")
+    spec = demo_spectrograms[idx]
+    fig, ax = plt.subplots(figsize=(4, 4))
+    ax.imshow(spec, aspect="auto", origin="lower", cmap="viridis")
+    ax.set_xticks([])
+    ax.set_yticks([])
     plt.tight_layout()
 
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=110)
+    fig.savefig(buf, format="png", dpi=100)
+    plt.close(fig)
+    buf.seek(0)
+    return send_file(buf, mimetype="image/png")
+
+
+@app.route("/feature_importance.png")
+def feature_importance_plot():
+    rf_model = ARTIFACTS["rf_model"]
+    feature_cols = ARTIFACTS["feature_cols"]
+    importances = pd.Series(rf_model.feature_importances_, index=feature_cols).sort_values()
+
+    fig, ax = plt.subplots(figsize=(6, 4))
+    importances.plot(kind="barh", ax=ax, color="#4C72B0")
+    ax.set_title("Random Forest Feature Importance")
+    ax.set_xlabel("Importance")
+    plt.tight_layout()
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=100)
     plt.close(fig)
     buf.seek(0)
     return send_file(buf, mimetype="image/png")
 
 
 if __name__ == "__main__":
-    app.run(debug=True, port=5000)
+    app.run(debug=True, port=5001)
